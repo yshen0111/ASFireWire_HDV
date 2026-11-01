@@ -71,11 +71,17 @@ jobs:
       - name: Resolve version
         id: version
         run: |
+          # A dev build keeps the project's build number and appends the run
+          # number (e.g. 33.12), so an installed Release app accepts it as a
+          # newer driver than the previous dev build. Tags keep the project's.
+          BUILD="$(awk '/CURRENT_PROJECT_VERSION:/ {print $2; exit}' project.yml)"
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             FULL="${GITHUB_REF_NAME#v}"
           else
             FULL="0.0.0-dev.${GITHUB_SHA:0:8}"
+            BUILD="${BUILD}.${GITHUB_RUN_NUMBER}"
           fi
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
           NUMERIC="${FULL%%-*}"; NUMERIC="${NUMERIC%%+*}"
           if ! printf '%s' "$NUMERIC" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$'; then
             echo "::error::Tag '${GITHUB_REF_NAME}' does not yield a numeric version (got '${NUMERIC}'). Use vMAJOR.MINOR.PATCH[-suffix]."
@@ -107,7 +113,8 @@ jobs:
       - name: Build (Release, unsigned by design)
         run: |
           ./build.sh --no-bump --config Release \
-            --set MARKETING_VERSION="${{ steps.version.outputs.numeric }}"
+            --set MARKETING_VERSION="${{ steps.version.outputs.numeric }}" \
+            --set CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build }}"
 
       - name: Package unsigned app and local installer
         id: package
