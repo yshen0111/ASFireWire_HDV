@@ -31,11 +31,17 @@ final class DVCaptureController: ObservableObject {
     @Published var systemLabel = "—"
     @Published var lastError: String?
     @Published var outputFileName: String?
+    /// Stream time (seconds) of each HDV tape dropout.
+    @Published var tapeDropouts: [Double] = []
 
     private var ring: DVCaptureRing?
     private var fileWriter: DVFileWriter?
     private var captureTask: Task<Void, Never>?
     private var assembler = DVFrameAssembler()
+    private var dropoutDetector = TransportStreamDropoutDetector()
+    private var accountedBusLoss: UInt64 = 0
+    /// Drains left in which a break is put down to a new bus loss.
+    private var busLossDrainsLeft = 0
     private var outputFolder: URL?
     private var captureStarted = Date()
 
@@ -65,10 +71,14 @@ final class DVCaptureController: ObservableObject {
         bytesWritten = 0
         framesSeen = 0
         transportStreamPackets = 0
+        tapeDropouts = []
         droppedFrames = 0
         duplicateBlocks = 0
         invalidBlocks = 0
         assembler.reset()
+        dropoutDetector.reset()
+        accountedBusLoss = 0
+        busLossDrainsLeft = 0
         systemLabel = "—"
         isCapturing = true
 
@@ -192,12 +202,41 @@ final class DVCaptureController: ObservableObject {
                                       connector: ASFWDriverConnector) async {
         var stream = Data()
         var packets = 0
+        var breaks: [Double] = []
         ring.drain { chunk in
             guard let bytes = chunk.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return
             }
             stream.append(bytes, count: chunk.count)
             packets += 1
+            if let seconds = dropoutDetector.ingest(chunk) {
+                breaks.append(seconds)
+            }
+        }
+
+        // Packets lost on the bus or in the ring also break the stream; those
+        // are counted by the driver, so the next break after a new loss is
+        // not a tape dropout. The driver counts a loss before it publishes
+        // the packets after it, but this drain may stop short of them, so the
+        // loss also covers the next drain.
+        let latest = ring.stats
+        let busLoss = UInt64(latest.dbcDiscontinuities) +
+                      UInt64(latest.droppedFragments) +
+                      UInt64(latest.overruns) +
+                      UInt64(latest.invalidSourcePackets)
+        if busLoss > accountedBusLoss {
+            accountedBusLoss = busLoss
+            busLossDrainsLeft = 2
+        }
+        for seconds in breaks {
+            if busLossDrainsLeft > 0 {
+                busLossDrainsLeft = 0
+            } else {
+                tapeDropouts.append(seconds)
+            }
+        }
+        if packets > 0, busLossDrainsLeft > 0 {
+            busLossDrainsLeft -= 1
         }
 
         systemLabel = "HDV (MPEG-2 TS)"
@@ -387,6 +426,9 @@ struct DVCaptureView: View {
                            value: connectionModeLabel(controller.stats.connectionMode))
             if controller.stats.streamFormat == .mpegTS {
                 LabeledContent("TS packets", value: "\(controller.transportStreamPackets)")
+                LabeledContent("Tape dropouts", value: dropoutSummary)
+                    .foregroundColor(controller.tapeDropouts.isEmpty ? .primary : .orange)
+                    .help("Places where the camcorder skipped part of the tape it could not read, timed from the start of the capture. Packets lost on the FireWire bus are counted separately.")
             } else {
                 LabeledContent("Frames", value: "\(controller.framesSeen)")
                 LabeledContent("Dropped frames", value: "\(controller.droppedFrames)")
@@ -510,6 +552,22 @@ struct DVCaptureView: View {
         case 4: return "Broadcast fallback"
         default: return "—"
         }
+    }
+
+    private var dropoutSummary: String {
+        let dropouts = controller.tapeDropouts
+        guard !dropouts.isEmpty else { return "0" }
+        let shown = dropouts.prefix(5).map(formatStreamTime).joined(separator: ", ")
+        let more = dropouts.count > 5 ? ", …" : ""
+        return "\(dropouts.count) (at \(shown)\(more))"
+    }
+
+    private func formatStreamTime(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        let (hours, minutes, secs) = (total / 3600, total / 60 % 60, total % 60)
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, secs)
+            : String(format: "%d:%02d", minutes, secs)
     }
 
     private func formatBytes(_ bytes: UInt64) -> String {

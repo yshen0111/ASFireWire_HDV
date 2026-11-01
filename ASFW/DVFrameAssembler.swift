@@ -131,3 +131,87 @@ struct DVFrameAssembler {
         return sequence * Self.blocksPerSequence + withinSequence
     }
 }
+
+/// Finds tape dropouts in an HDV capture (MPEG-2 transport stream,
+/// ISO/IEC 13818-1). The camcorder skips what it cannot read from tape and
+/// keeps sending, so a dropout shows only inside the stream: the continuity
+/// counter of every PID jumps at the same point. On an HVR-Z1U a 0.6 s
+/// dropout broke all seven PIDs within 41 packets, so breaks closer together
+/// than `mergeWindowPackets` are one dropout. Whether a recording start/stop
+/// point on the tape also breaks the counters has not been checked.
+struct TransportStreamDropoutDetector {
+    static let packetBytes = 188
+    static let syncByte: UInt8 = 0x47
+    static let nullPID: UInt16 = 0x1FFF
+    /// About 0.25 s of 25 Mbit/s HDV.
+    static let mergeWindowPackets = 4096
+    /// A larger PCR step (or a backward one) is not playback time, so the
+    /// stream clock does not advance across it.
+    static let maxPCRStepSeconds = 2.0
+
+    private var continuity: [UInt16: UInt8] = [:]
+    private var pcrPID: UInt16?
+    private var lastPCRSeconds: Double?
+    private var streamSeconds = 0.0
+    private var packetIndex = 0
+    private var lastBreakPacket: Int?
+
+    mutating func reset() {
+        self = TransportStreamDropoutDetector()
+    }
+
+    /// Returns the stream time in seconds (from the PCR, counted from the
+    /// first PCR seen) when this packet starts a new dropout.
+    mutating func ingest(_ packet: UnsafeRawBufferPointer) -> Double? {
+        defer { packetIndex += 1 }
+        guard packet.count == Self.packetBytes, packet[0] == Self.syncByte else {
+            return nil
+        }
+
+        let pid = UInt16(packet[1] & 0x1F) << 8 | UInt16(packet[2])
+        let hasAdaptationField = packet[3] & 0x20 != 0
+        let hasPayload = packet[3] & 0x10 != 0
+        let counter = packet[3] & 0x0F
+
+        if hasAdaptationField {
+            readPCR(packet, pid: pid)
+        }
+
+        // The counter only advances on packets with a payload; one repeat of
+        // a packet (same counter) is allowed. ISO/IEC 13818-1 2.4.3.3.
+        guard hasPayload, pid != Self.nullPID,
+              let previous = continuity.updateValue(counter, forKey: pid),
+              counter != (previous &+ 1) & 0x0F,
+              counter != previous else {
+            return nil
+        }
+
+        defer { lastBreakPacket = packetIndex }
+        if let lastBreakPacket,
+           packetIndex - lastBreakPacket <= Self.mergeWindowPackets {
+            return nil
+        }
+        return streamSeconds
+    }
+
+    private mutating func readPCR(_ packet: UnsafeRawBufferPointer, pid: UInt16) {
+        // Adaptation field: length at byte 4, flags at 5 (0x10 = PCR present),
+        // then the 33-bit PCR base in 90 kHz units. The 27 MHz extension adds
+        // under a millisecond and is ignored.
+        guard packet[4] >= 7, packet[5] & 0x10 != 0 else { return }
+        if pcrPID == nil { pcrPID = pid }
+        guard pid == pcrPID else { return }
+
+        let base = UInt64(packet[6]) << 25 | UInt64(packet[7]) << 17 |
+                   UInt64(packet[8]) << 9 | UInt64(packet[9]) << 1 |
+                   UInt64(packet[10] >> 7)
+        let seconds = Double(base) / 90_000
+        if let lastPCRSeconds {
+            let step = seconds - lastPCRSeconds
+            if step >= 0, step <= Self.maxPCRStepSeconds {
+                streamSeconds += step
+            }
+        }
+        lastPCRSeconds = seconds
+    }
+}
