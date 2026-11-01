@@ -30,15 +30,18 @@ final class DVCaptureController: ObservableObject {
     @Published var stats = DVCaptureStats()
     @Published var systemLabel = "—"
     @Published var lastError: String?
+    @Published var outputFileName: String?
 
     private var ring: DVCaptureRing?
     private var fileWriter: DVFileWriter?
     private var captureTask: Task<Void, Never>?
     private var assembler = DVFrameAssembler()
+    private var outputFolder: URL?
+    private var captureStarted = Date()
 
     func start(connector: ASFWDriverConnector,
                deviceGUID: UInt64,
-               url: URL) {
+               folder: URL) {
         guard !isCapturing else { return }
         lastError = nil
 
@@ -53,17 +56,11 @@ final class DVCaptureController: ObservableObject {
             return
         }
 
-        let writer: DVFileWriter
-        do {
-            writer = try DVFileWriter(url: url)
-        } catch {
-            lastError = "Could not create \(url.lastPathComponent): \(error.localizedDescription)"
-            _ = connector.stopDVCapture()
-            mappedRing.unmap()
-            return
-        }
-
-        fileWriter = writer
+        // The file is created once the driver reports DV or HDV, so its
+        // extension matches the stream (see openFileIfNeeded).
+        outputFolder = folder
+        captureStarted = Date()
+        outputFileName = nil
         ring = mappedRing
         bytesWritten = 0
         framesSeen = 0
@@ -93,6 +90,9 @@ final class DVCaptureController: ObservableObject {
         // Final drain so the tail of the stream lands in the file.
         await tick(connector: connector)
         await apply(assembler.finish(), connector: connector)
+        if fileWriter == nil, lastError == nil {
+            lastError = "No video arrived, so no file was written. Start capture, then press Play."
+        }
         await shutdown(connector: connector)
     }
 
@@ -104,7 +104,12 @@ final class DVCaptureController: ObservableObject {
         guard let ring else { return }
 
         // Nothing is published before the driver locks the format.
-        switch ring.streamFormat {
+        let format = ring.streamFormat
+        if format != .unknown, !openFileIfNeeded(for: format) {
+            await shutdown(connector: connector)
+            return
+        }
+        switch format {
         case .mpegTS:
             await drainTransportStream(ring, connector: connector)
         case .dv:
@@ -118,6 +123,39 @@ final class DVCaptureController: ObservableObject {
             await shutdown(connector: connector)
         }
     }
+
+    // The chosen folder is granted as a whole by the sandbox, so the file can
+    // be named here, e.g. capture-2026-11-01-135615.m2t. An existing file is
+    // never overwritten; a numeric suffix is added instead.
+    private func openFileIfNeeded(for format: DVStreamFormat) -> Bool {
+        guard fileWriter == nil else { return true }
+        guard let outputFolder else { return false }
+
+        let stamp = Self.fileStampFormatter.string(from: captureStarted)
+        let ext = format == .mpegTS ? "m2t" : "dv"
+        var url = outputFolder.appendingPathComponent("capture-\(stamp).\(ext)")
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = outputFolder.appendingPathComponent("capture-\(stamp)-\(suffix).\(ext)")
+            suffix += 1
+        }
+
+        do {
+            fileWriter = try DVFileWriter(url: url)
+            outputFileName = url.lastPathComponent
+            return true
+        } catch {
+            lastError = "Could not create \(url.lastPathComponent): \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private static let fileStampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return formatter
+    }()
 
     private func drainDV(_ ring: DVCaptureRing,
                          connector: ASFWDriverConnector) async {
@@ -215,7 +253,7 @@ struct DVCaptureView: View {
 
     @State private var avcUnits: [ASFWDriverConnector.AVCUnitInfo] = []
     @State private var selectedUnitGUID: UInt64?
-    @State private var outputURL: URL?
+    @State private var outputFolder: URL?
     @State private var transportBusy = false
     @State private var transportStatus: String?
 
@@ -300,15 +338,16 @@ struct DVCaptureView: View {
     private var captureSection: some View {
         Section("Capture") {
             HStack {
-                Button("Choose Output File…") { chooseOutputFile() }
+                Button("Choose Output Folder…") { chooseOutputFolder() }
                     .disabled(controller.isCapturing)
-                Text(outputURL?.lastPathComponent ?? "No file selected")
+                Text(outputFolder?.lastPathComponent ?? "No folder selected")
                     .foregroundColor(.secondary)
             }
-            if let hint = fileExtensionHint {
-                Label(hint, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundColor(.orange)
+            Text("Each capture gets its own file, named .dv or .m2t to match what the camcorder sends.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if let name = controller.outputFileName {
+                LabeledContent("File", value: name)
             }
 
             if controller.isCapturing {
@@ -324,7 +363,7 @@ struct DVCaptureView: View {
                 } label: {
                     Label("Start Capture", systemImage: "record.circle")
                 }
-                .disabled(!viewModel.isConnected || outputURL == nil || selectedUnitGUID == nil)
+                .disabled(!viewModel.isConnected || outputFolder == nil || selectedUnitGUID == nil)
             }
 
             captureStats
@@ -437,36 +476,24 @@ struct DVCaptureView: View {
         }
     }
 
-    // The format is only known once the stream arrives, and the sandbox only
-    // grants access to the exact file chosen, so a mismatched name is flagged
-    // rather than changed.
-    private var fileExtensionHint: String? {
-        guard let ext = outputURL?.pathExtension.lowercased() else { return nil }
-        switch controller.stats.streamFormat {
-        case .mpegTS where !["m2t", "ts"].contains(ext):
-            return "The camcorder is sending HDV (MPEG-2 TS). Name the file .m2t so players recognise it."
-        case .dv where ext != "dv":
-            return "The camcorder is sending DV. Name the file .dv so players recognise it."
-        default:
-            return nil
-        }
-    }
-
-    private func chooseOutputFile() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "capture.dv"
-        panel.message = "Use .dv for DV tapes and .m2t for HDV tapes."
+    private func chooseOutputFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Choose a folder for captures. Files are named automatically."
         if panel.runModal() == .OK {
-            outputURL = panel.url
+            outputFolder = panel.url
         }
     }
 
     private func startCapture() {
-        guard let url = outputURL, let guid = selectedUnitGUID else { return }
+        guard let folder = outputFolder, let guid = selectedUnitGUID else { return }
         controller.start(connector: viewModel.connector,
                          deviceGUID: guid,
-                         url: url)
+                         folder: folder)
     }
 
     private func connectionModeLabel(_ rawValue: UInt8) -> String {
