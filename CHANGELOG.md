@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RME Fireface: the card is told to fetch playback audio once both streams run, and to stop after streaming stops. With this, a contributor's Fireface 800 played audio on outputs 1/2 at 48 kHz.
 - RME Fireface 400: a start no longer times out reading the firmware revision (the wrong flash status register was polled).
 - RME Fireface: playback sends full 32-bit samples, and capture is scaled to match.
+- App: Choose Output File in DV Capture did nothing on ad-hoc installs (`install.sh`, `sign.sh`). Those sign with `App.entitlements`, which lacked the user-selected file entitlement that Xcode adds from `ENABLE_USER_SELECTED_FILES`; macOS refused to show the save panel. The entitlement is now in the file.
 
 ### Changed
 
@@ -43,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- HDV capture: the DV Capture view also records HDV camcorders, which send an MPEG-2 transport stream (IEC 61883-4) instead of DV. The driver detects the format from the stream, rebuilds the 188-byte TS packets (including ones split across bus packets) and checks their sync byte; the app writes them to a `.m2t` file. Built against the stream from a Sony HVR-Z1U playing an HDV tape; capture of a complete file is not yet hardware-tested. Each session logs a `[DV] session summary` line when it stops. The shared capture ring is now version 4, so the app and driver must come from the same build.
 - RME Fireface: channel names (Analog, Mic, Phones, S/PDIF, ADAT) for the Fireface 400 and 800.
 - RME Fireface: before every start the driver sends the card the settings saved in its flash (phantom power, levels, inputs, S/PDIF, sync reference), as RME's and FFADO's drivers do, with the clock always set to internal (master). Nothing is sent when the flash cannot be read or decoded. Logged as `[RME] settings`, `[RME] config` and `[RME] config readback`. This should also turn the HOST LED off.
 - RME Fireface: start, stop and clock lock changes are logged with the card's clock state decoded (`[RME] clock`), for diagnosing remote reports.
