@@ -87,13 +87,16 @@ final class DVCaptureController: ObservableObject {
         captureTask?.cancel()
         captureTask = nil
 
-        // Final drain so the tail of the stream lands in the file.
+        // Stop the driver before the final drain, so nothing is published
+        // after it; draining first lost the last ~0.01 s of HDV. The ring
+        // stays readable because this mapping holds its own reference.
+        let driverStopped = connector.stopDVCapture()
         await tick(connector: connector)
         await apply(assembler.finish(), connector: connector)
         if fileWriter == nil, lastError == nil {
             lastError = "No video arrived, so no file was written. Start capture, then press Play."
         }
-        await shutdown(connector: connector)
+        await shutdown(connector: connector, stopDriver: !driverStopped)
     }
 
     func reportError(_ message: String) {
@@ -227,10 +230,13 @@ final class DVCaptureController: ObservableObject {
         }
     }
 
-    private func shutdown(connector: ASFWDriverConnector) async {
+    private func shutdown(connector: ASFWDriverConnector,
+                          stopDriver: Bool = true) async {
         captureTask?.cancel()
         captureTask = nil
-        _ = connector.stopDVCapture()
+        if stopDriver {
+            _ = connector.stopDVCapture()
+        }
         ring?.unmap()
         ring = nil
         if let fileWriter {
