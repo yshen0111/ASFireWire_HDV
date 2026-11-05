@@ -137,8 +137,8 @@ struct DVFrameAssembler {
 /// keeps sending, so a dropout shows only inside the stream: the continuity
 /// counter of every PID jumps at the same point. On an HVR-Z1U a 0.6 s
 /// dropout broke all seven PIDs within 41 packets, so breaks closer together
-/// than `mergeWindowPackets` are one dropout. Whether a recording start/stop
-/// point on the tape also breaks the counters has not been checked.
+/// than `mergeWindowPackets` are one dropout. A recording stop point on the
+/// tape did not break the counters on that camera (one stop point checked).
 struct TransportStreamDropoutDetector {
     static let packetBytes = 188
     static let syncByte: UInt8 = 0x47
