@@ -1,5 +1,11 @@
 # ASFireWire
 
+> **This is an unofficial fork of [mrmidi/ASFireWire](https://github.com/mrmidi/ASFireWire) that adds HDV capture.**
+> The fork is not maintained by or affiliated with the ASFireWire author, and its changes are not in upstream.
+> See [What this fork adds](#what-this-fork-adds). The rest of this README, including everything written as "I",
+> is the upstream author's text, and its website, sponsor, and contact links are upstream's. Please do not report
+> problems with this fork's changes to upstream.
+
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mrmidi_ASFW&metric=alert_status&token=3ca1b3d10414117bb3e75b1779090b4ea47f1585)](https://sonarcloud.io/summary/new_code?id=mrmidi_ASFW) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/mrmidi/ASFireWire)
 
 ASFireWire restores FireWire (IEEE 1394) functionality removed from macOS Tahoe (26).
@@ -8,6 +14,71 @@ and SCSIControllerDriverKit for SBP-2 devices.
 
 I started it to keep useful FireWire audio hardware running on modern Macs.
 Contributors have since helped extend it to DV cameras and film scanners.
+
+## What this fork adds
+
+- **HDV capture.** The capture view also records HDV camcorders, which send an MPEG-2
+  transport stream (IEC 61883-4) instead of DV. The driver detects the format from the
+  stream and the app writes the transport stream to a `.m2t` file.
+- **Automatic file names.** You choose an output folder instead of a file. Each capture
+  gets its own file, such as `capture-2026-11-01-135615.m2t` or `.dv`, with the extension
+  matching what the camcorder sends. Existing files are never overwritten.
+- **Tape dropout counter (HDV only).** The capture view shows how many times the
+  camcorder skipped tape it could not read, and when, for example `1 (at 0:17)`. Times
+  count from the start of the capture, not the start of the tape. Packets lost on the
+  FireWire bus are counted separately.
+- **Fixes.** The output picker now opens on ad-hoc installs, and the end of a capture is
+  no longer cut off when you stop it. Dev builds also get increasing build numbers, so
+  each one can replace the last.
+
+See [CHANGELOG.md](CHANGELOG.md) for details.
+
+### What has been tested
+
+Everything was tested with one setup: a Sony HVR-Z1U on an Apple Thunderbolt to FireWire
+Adapter, connected to an Intel Mac Pro (2019) running macOS 26.7.
+
+- HDV capture from tape: no bad packets or lost packets, and the files play in VLC.
+- DV capture from the same camera with i.LINK CONV on: complete, valid frames.
+- A tape with a known damaged spot: one dropout reported at the right time, followed by a
+  brief freeze in VLC and normal playback after it.
+- A recording stop point on tape: not counted as a dropout (one stop point checked).
+
+Other camcorders have not been tested. Builds include Apple silicon code, but this fork
+has not been run on an Apple silicon Mac.
+
+### Known limitations
+
+- On the HVR-Z1U the driver falls back to listening on broadcast channel 63 rather than
+  setting up a dedicated connection. Captures were not affected.
+- The transport buttons can report "no FCP response" even though the camera acts on the
+  command.
+- The output folder is not remembered between app launches.
+
+### Installing this fork
+
+The signed builds on the website below are upstream's and do not include these changes.
+This fork has no signed builds or GitHub releases. Its builds are unsigned packages made
+by the **Release (prebuilt tester build)** workflow under
+[Actions](https://github.com/yshen0111/ASFireWire_HDV/actions/workflows/release.yml).
+Workflow downloads require a GitHub login and expire after a while; to make your own,
+fork this repository and run the workflow there.
+
+1. Read upstream's [Installing](https://github.com/mrmidi/ASFireWire/wiki/Installing) guide.
+   This path needs SIP (System Integrity Protection) disabled, which lowers your Mac's
+   security.
+2. Unzip the package into a local folder such as `~/Downloads`. Do not use iCloud Drive,
+   because its file attributes break code signing.
+3. Run `./install.sh` from that folder, then click **Install** in the app.
+4. Run `systemextensionsctl list` to see which driver is active. After an upgrade the old
+   driver can keep running until you reconnect the FireWire adapter or restart your Mac.
+
+Use this fork's app with this fork's driver. The fork changed the capture ring they share,
+so neither works with upstream's version of the other.
+
+To capture, open the capture view, choose an output folder, click **Start Capture**, then
+start playback. For HDV, turn i.LINK CONV off on the HVR-Z1U; with it on, the camera
+converts to DV.
 
 ## Download and installation
 
@@ -51,7 +122,8 @@ independent engineering work deserves to continue, please consider supporting it
 - FireWire controller bring-up, bus management, topology, and device discovery.
 - Asynchronous transactions and isochronous communication.
 - Audio streaming through AV/C, DICE/TCAT, MOTU, and RME device protocols.
-- DV capture to `.dv` files and AV/C tape transport control.
+- DV capture to `.dv` files, HDV capture to `.m2t` files (this fork), and AV/C tape
+  transport control.
 - SBP-2/SCSI integration for storage devices and scanners.
 
 Contributors have verified DV capture from various MiniDV camcorders and scanning
